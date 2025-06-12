@@ -1,0 +1,229 @@
+import pandas as pd
+import numpy as np
+import re
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+# Ruta al archivo CSV
+archivo_entrada = r""
+
+# Funciones de cálculo
+def calcular_auc_y_centroide(tiempo, od):
+    auc = np.trapz(od, tiempo)
+    if auc == 0:
+        return auc, np.nan
+    centroide = np.trapz(tiempo * od, tiempo) / auc
+    return auc, centroide
+
+def calcular_mumax(tiempo, od):
+    deriv = np.gradient(od, tiempo)
+    mumax = np.nanmax(deriv)
+    return mumax
+
+def calcular_nasymptote(od):
+    return np.nanmax(od)
+
+def extraer_grupo(nombre):
+    grupo = re.sub(r'rep\s*\d+', '', nombre, flags=re.IGNORECASE).strip()
+    grupo = grupo.replace("cepa232", "").replace("cepa 232", "").replace("cepa_232", "").strip()
+    return grupo
+
+# Cargar datos
+df = pd.read_csv(archivo_entrada, delimiter=";", decimal=",")
+df.columns = df.columns.str.strip()
+for col in df.columns[1:]:
+    if df[col].isna().all():
+        df.drop(columns=col, inplace=True)
+    else:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+tiempo = df.iloc[:, 0].values
+
+# Agrupar columnas en grupos limpios y calcular media y std
+grupos_raw = {}
+for col in df.columns[1:]:
+    grupo = extraer_grupo(col)
+    grupos_raw.setdefault(grupo, []).append(col)
+
+df_promedio = pd.DataFrame({"Tiempo(h)": tiempo})
+df_std = pd.DataFrame({"Tiempo(h)": tiempo})
+
+for grupo, cols in grupos_raw.items():
+    cols_validas = [c for c in cols if c in df.columns]
+    if len(cols_validas) > 0:
+        df_promedio[grupo] = df[cols_validas].mean(axis=1)
+        df_std[grupo] = df[cols_validas].std(axis=1)
+
+# Cálculo de métricas por grupo promedio
+resultados = []
+for grupo in grupos_raw.keys():
+    od_prom = df_promedio[grupo].values
+    auc, centroide = calcular_auc_y_centroide(tiempo, od_prom)
+    mumax = calcular_mumax(tiempo, od_prom)
+    nasymptote = calcular_nasymptote(od_prom)
+    resultados.append({
+        "Grupo": grupo,
+        "AUC": auc,
+        "Centroide": centroide,
+        "μmax": mumax,
+        "Nasymptote": nasymptote
+    })
+
+df_metricas_prom = pd.DataFrame(resultados)
+
+# Índice centroide relativo al control
+control_nombre = "C+"
+mask_control = df_metricas_prom['Grupo'].str.lower() == control_nombre.lower()
+if mask_control.any():
+    centroide_control_prom = df_metricas_prom.loc[mask_control, "Centroide"].values[0]
+else:
+    centroide_control_prom = np.nan
+
+df_metricas_prom['Indice Centroide (%)'] = ((centroide_control_prom - df_metricas_prom['Centroide']) / centroide_control_prom) * 100
+
+# Función para graficar barras con error
+def graficar_barras(x, y_mean, y_std, ylabel, title, color_map):
+    plt.figure(figsize=(10,5))
+    bars = plt.bar(x, y_mean, yerr=y_std, capsize=5, color=color_map[:len(x)], edgecolor='black')
+    plt.xticks(rotation=45, ha='right', fontsize=10)
+    plt.ylabel(ylabel)
+    plt.title(title, fontsize=14)
+    plt.tight_layout()
+    for bar, mean, std in zip(bars, y_mean, y_std):
+        yval = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2, yval + std + 0.02*max(y_mean), f"{mean:.2f}", ha='center', va='bottom', fontsize=9)
+    plt.grid(axis='y', linestyle='--', alpha=0.4)
+    plt.show()
+
+# Estadísticas por réplicas para barras
+estadisticas_auc = []
+estadisticas_centroide = []
+estadisticas_indice = []
+estadisticas_mumax = []
+estadisticas_nasymptote = []
+
+for grupo, cols in grupos_raw.items():
+    aucs = []
+    centroides = []
+    mumaxs = []
+    nasymptotes = []
+    for c in cols:
+        od = df[c].values
+        auc, centroide = calcular_auc_y_centroide(tiempo, od)
+        mumax = calcular_mumax(tiempo, od)
+        nasymptote = calcular_nasymptote(od)
+        aucs.append(auc)
+        centroides.append(centroide)
+        mumaxs.append(mumax)
+        nasymptotes.append(nasymptote)
+    indice_centroide = ((centroide_control_prom - np.array(centroides)) / centroide_control_prom) * 100
+    estadisticas_auc.append((np.mean(aucs), np.std(aucs)))
+    estadisticas_centroide.append((np.mean(centroides), np.std(centroides)))
+    estadisticas_indice.append((np.mean(indice_centroide), np.std(indice_centroide)))
+    estadisticas_mumax.append((np.mean(mumaxs), np.std(mumaxs)))
+    estadisticas_nasymptote.append((np.mean(nasymptotes), np.std(nasymptotes)))
+
+def limpiar_nombre_grupo(g):
+    return g.replace("cepa232", "").replace("cepa 232", "").strip()
+
+grupos_limpios = [limpiar_nombre_grupo(g) for g in grupos_raw.keys()]
+
+colores_barras = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf', '#999999']
+
+# Graficar barras para todas las métricas
+graficar_barras(grupos_limpios,
+                [m[0] for m in estadisticas_auc],
+                [m[1] for m in estadisticas_auc],
+                'AUC promedio',
+                'Comparación de AUC promedio por grupo (cepa 232)',
+                colores_barras)
+
+graficar_barras(grupos_limpios,
+                [m[0] for m in estadisticas_centroide],
+                [m[1] for m in estadisticas_centroide],
+                'Centroide promedio (h)',
+                'Comparación de Centroide promedio por grupo (cepa 232)',
+                colores_barras)
+
+graficar_barras(grupos_limpios,
+                [m[0] for m in estadisticas_indice],
+                [m[1] for m in estadisticas_indice],
+                'Índice de Centroide (%)',
+                'Comparación de Índice de Centroide (%) por grupo (cepa 232)',
+                colores_barras)
+
+graficar_barras(grupos_limpios,
+                [m[0] for m in estadisticas_mumax],
+                [m[1] for m in estadisticas_mumax],
+                'μmax promedio',
+                'Comparación de μmax promedio por grupo (cepa 232)',
+                colores_barras)
+
+graficar_barras(grupos_limpios,
+                [m[0] for m in estadisticas_nasymptote],
+                [m[1] for m in estadisticas_nasymptote],
+                'Nasymptote promedio (OD)',
+                'Comparación de Nasymptote promedio por grupo (cepa 232)',
+                colores_barras)
+
+# Análisis PCA
+df_replicas_metricas = []
+
+for grupo, cols in grupos_raw.items():
+    for c in cols:
+        od = df[c].values
+        auc, centroide = calcular_auc_y_centroide(tiempo, od)
+        mumax = calcular_mumax(tiempo, od)
+        nasymptote = calcular_nasymptote(od)
+        indice_centroide = ((centroide_control_prom - centroide) / centroide_control_prom) * 100
+        df_replicas_metricas.append({
+            "Grupo": limpiar_nombre_grupo(grupo),
+            "Columna": c,
+            "AUC": auc,
+            "Centroide": centroide,
+            "Índice Centroide (%)": indice_centroide,
+            "μmax": mumax,
+            "Nasymptote": nasymptote
+        })
+
+df_metricas_replicas = pd.DataFrame(df_replicas_metricas)
+
+# PCA plot
+features = ['AUC', 'Centroide', 'Índice Centroide (%)', 'μmax', 'Nasymptote']
+X = df_metricas_replicas[features].dropna()
+grupos_pca = df_metricas_replicas.loc[X.index, 'Grupo']
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+plt.figure(figsize=(8,6))
+for grupo in grupos_pca.unique():
+    idx = grupos_pca == grupo
+    plt.scatter(X_pca[idx, 0], X_pca[idx, 1], label=grupo, alpha=0.8)
+
+plt.xlabel('PC1 (%.1f%%)' % (pca.explained_variance_ratio_[0]*100))
+plt.ylabel('PC2 (%.1f%%)' % (pca.explained_variance_ratio_[1]*100))
+plt.title('Análisis PCA de métricas (réplicas)')
+plt.legend(loc='best', fontsize=9)
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+
+# Finalmente, gráfica general de curvas promedio y desviación estándar
+plt.figure(figsize=(16,9))
+for grupo in grupos_raw.keys():
+    promedio = df_promedio[grupo].values
+    std = df_std[grupo].values
+    plt.plot(tiempo, promedio, label=limpiar_nombre_grupo(grupo), linewidth=2)
+    plt.fill_between(tiempo, promedio - std, promedio + std, alpha=0.2)
+plt.xlabel('Tiempo (h)', fontsize=14)
+plt.ylabel('Absorbancia (OD)', fontsize=14)
+plt.title('Curvas promedio absorbancia vs tiempo (general)', fontsize=16)
+plt.legend(loc='upper right', fontsize=9, ncol=2)
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
