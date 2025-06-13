@@ -2,6 +2,174 @@ import pandas as pd
 import numpy as np
 import re
 import matplotlib.pyplot as plt
+from scipy import stats
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+# Ruta al archivo CSV
+archivo_entrada = r""
+
+# Funciones de cálculo
+def calcular_auc_y_centroide(tiempo, od):
+    auc = np.trapz(od, tiempo)
+    if auc == 0:
+        return auc, np.nan
+    centroide = np.trapz(tiempo * od, tiempo) / auc
+    return auc, centroide
+
+def calcular_mumax(tiempo, od):
+    deriv = np.gradient(od, tiempo)
+    mumax = np.nanmax(deriv)
+    return mumax
+
+def calcular_nasymptote(od):
+    return np.nanmax(od)
+
+def extraer_grupo(nombre):
+    grupo = re.sub(r'rep\s*\d+', '', nombre, flags=re.IGNORECASE).strip()
+    grupo = grupo.replace("cepa232", "").replace("cepa 232", "").replace("cepa_232", "").strip()
+    return grupo
+
+# Cargar datos
+df = pd.read_csv(archivo_entrada, delimiter=";", decimal=",")
+df.columns = df.columns.str.strip()
+for col in df.columns[1:]:
+    if df[col].isna().all():
+        df.drop(columns=col, inplace=True)
+    else:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+tiempo = df.iloc[:, 0].values
+
+# Agrupar columnas por grupo
+grupos_raw = {}
+for col in df.columns[1:]:
+    grupo = extraer_grupo(col)
+    grupos_raw.setdefault(grupo, []).append(col)
+
+grupos = {}
+for grupo, cols in grupos_raw.items():
+    cols_validas = [c for c in cols if c in df.columns]
+    if len(cols_validas) > 0:
+        grupos[grupo] = cols_validas
+
+df_promedio = pd.DataFrame({"Tiempo(h)": tiempo})
+df_std = pd.DataFrame({"Tiempo(h)": tiempo})
+
+for grupo, cols in grupos.items():
+    df_promedio[grupo] = df[cols].mean(axis=1)
+    df_std[grupo] = df[cols].std(axis=1)
+
+resultados = []
+for grupo in grupos.keys():
+    od_prom = df_promedio[grupo].values
+    auc, centroide = calcular_auc_y_centroide(tiempo, od_prom)
+    mumax = calcular_mumax(tiempo, od_prom)
+    nasymptote = calcular_nasymptote(od_prom)
+    resultados.append({
+        "Grupo": grupo,
+        "AUC": auc,
+        "Centroide": centroide,
+        "μmax": mumax,
+        "Nasymptote": nasymptote
+    })
+
+df_metricas_prom = pd.DataFrame(resultados)
+
+control_nombre = "C+"
+mask_control = df_metricas_prom['Grupo'].str.lower() == control_nombre.lower()
+if mask_control.any():
+    centroide_control_prom = df_metricas_prom.loc[mask_control, "Centroide"].values[0]
+else:
+    centroide_control_prom = np.nan
+
+df_metricas_prom['Indice Centroide (%)'] = ((centroide_control_prom - df_metricas_prom['Centroide']) / centroide_control_prom) * 100
+
+def graficar_barras(x, y_mean, y_std, ylabel, title, color_map):
+    plt.figure(figsize=(10,5))
+    bars = plt.bar(x, y_mean, yerr=y_std, capsize=5, color=color_map[:len(x)], edgecolor='black')
+    plt.xticks(rotation=45, ha='right', fontsize=10)
+    plt.ylabel(ylabel)
+    plt.title(title, fontsize=14)
+    plt.tight_layout()
+    for bar, mean, std in zip(bars, y_mean, y_std):
+        yval = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2, yval + std + 0.02*max(y_mean), f"{mean:.2f}", ha='center', va='bottom', fontsize=9)
+    plt.grid(axis='y', linestyle='--', alpha=0.4)
+    plt.show()
+
+estadisticas_auc = []
+estadisticas_centroide = []
+estadisticas_indice = []
+estadisticas_mumax = []
+estadisticas_nasymptote = []
+
+for grupo, cols in grupos.items():
+    aucs = []
+    centroides = []
+    mumaxs = []
+    nasymptotes = []
+    for c in cols:
+        od = df[c].values
+        auc, centroide = calcular_auc_y_centroide(tiempo, od)
+        mumax = calcular_mumax(tiempo, od)
+        nasymptote = calcular_nasymptote(od)
+        aucs.append(auc)
+        centroides.append(centroide)
+        mumaxs.append(mumax)
+        nasymptotes.append(nasymptote)
+    indice_centroide = ((centroide_control_prom - np.array(centroides)) / centroide_control_prom) * 100
+    estadisticas_auc.append((np.mean(aucs), np.std(aucs)))
+    estadisticas_centroide.append((np.mean(centroides), np.std(centroides)))
+    estadisticas_indice.append((np.mean(indice_centroide), np.std(indice_centroide)))
+    estadisticas_mumax.append((np.mean(mumaxs), np.std(mumaxs)))
+    estadisticas_nasymptote.append((np.mean(nasymptotes), np.std(nasymptotes)))
+
+def limpiar_nombre_grupo(g):
+    return g.replace("cepa232", "").replace("cepa 232", "").strip()
+
+grupos_limpios = [limpiar_nombre_grupo(g) for g in grupos.keys()]
+colores_barras = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf', '#999999']
+
+# Gráficas de barras globales
+graficar_barras(grupos_limpios, [m[0] for m in estadisticas_auc], [m[1] for m in estadisticas_auc],
+                'AUC promedio', 'Comparación de AUC promedio por grupo (cepa 232)', colores_barras)
+
+graficar_barras(grupos_limpios, [m[0] for m in estadisticas_centroide], [m[1] for m in estadisticas_centroide],
+                'Centroide promedio (h)', 'Comparación de Centroide promedio por grupo (cepa 232)', colores_barras)
+
+graficar_barras(grupos_limpios, [m[0] for m in estadisticas_indice], [m[1] for m in estadisticas_indice],
+                'Índice de Centroide (%)', 'Comparación de Índice de Centroide (%) por grupo (cepa 232)', colores_barras)
+
+graficar_barras(grupos_limpios, [m[0] for m in estadisticas_mumax], [m[1] for m in estadisticas_mumax],
+                'μmax promedio', 'Comparación de μmax promedio por grupo (cepa 232)', colores_barras)
+
+graficar_barras(grupos_limpios, [m[0] for m in estadisticas_nasymptote], [m[1] for m in estadisticas_nasymptote],
+                'Nasymptote promedio (OD)', 'Comparación de Nasymptote promedio por grupo (cepa 232)', colores_barras)
+
+# Curvas promedio generales
+plt.figure(figsize=(16,9))
+colores_tratamientos = ['red', 'blue', 'green', 'orange', 'purple', 'gold', 'brown', 'pink', 'teal']
+for i, (grupo, cols) in enumerate(grupos.items()):
+    promedio = df_promedio[grupo].values
+    std = df_std[grupo].values
+    color = colores_tratamientos[i % len(colores_tratamientos)]
+    plt.plot(tiempo, promedio, label=limpiar_nombre_grupo(grupo), color=color, linewidth=2)
+    plt.fill_between(tiempo, promedio - std, promedio + std, color=color, alpha=0.2)
+
+plt.xlabel('Tiempo (h)', fontsize=14)
+plt.ylabel('Absorbancia (OD)', fontsize=14)
+plt.title('Curvas promedio de absorbancia vs tiempo para todos los tratamientos (cepa 232)', fontsize=16)
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.legend(loc='upper right', fontsize=10, ncol=2, frameon=True)
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.tight_layout()
+plt.show()
+import pandas as pd
+import numpy as np
+import re
+import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
